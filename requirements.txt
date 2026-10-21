@@ -1,0 +1,31 @@
+# Desktop UI
+customtkinter>=5.2.2
+Pillow>=10.0
+
+# Document import
+pymupdf>=1.24          # PDF text, layout and images (preferred)
+pypdf>=4.0             # PDF fallback if PyMuPDF is unavailable
+EbookLib>=0.18         # EPUB
+beautifulsoup4>=4.12   # EPUB / HTML parsing
+lxml>=5.0              # faster HTML parser (EbookLib needs it anyway)
+python-docx>=1.1       # DOCX import + export
+
+# Export
+reportlab>=4.0         # PDF export
+
+# Windows: legacy .doc import through Microsoft Word, and read-aloud through the
+# built-in SAPI voices. (For .doc you can instead put LibreOffice's `soffice` on PATH.)
+pywin32>=306; sys_platform == "win32"
+
+# Windows: text recognition (OCR) for photo cards with the built-in Windows OCR engine.
+# On macOS/Linux install Tesseract instead (brew/apt install tesseract).
+winrt-runtime>=3.0; sys_platform == "win32"
+winrt-Windows.Foundation>=3.0; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.0; sys_platform == "win32"
+winrt-Windows.Globalization>=3.0; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging>=3.0; sys_platform == "win32"
+winrt-Windows.Media.Ocr>=3.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=3.0; sys_platform == "win32"
+
+# Development
+pytest>=8.0
