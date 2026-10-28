@@ -1971,9 +1971,8 @@ class LibraryView(ctk.CTkFrame):
         self._changed()
 
     def _purge(self, sid: int):
-        if messagebox.askyesno("Purge section", "Permanently delete this section and its images?", icon="warning"):
-            self.kb.purge_section(sid)
-            self._changed()
+        self.kb.purge_section(sid)
+        self._changed()
 
 
 # ---------------------------------------------------------------------------
