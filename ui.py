@@ -2,6 +2,8 @@
 ui.py - CustomTkinter desktop interface for Memory Palace.
 
 Views (switched from the sidebar):
+* Read    - the main screen: books by chapter and header; text shown in full or
+            one sentence per line with a ✕ to delete it.
 * Review  - one card at a time, swipe or buttons: right = I know,
             left = I don't know, down = delete. Arrow keys work too; Ctrl+Z undoes.
 * Library - browse, search, edit, tag, delete and restore documents and sections.
@@ -47,6 +49,7 @@ from db import MANUAL_FORMAT, KnowledgeBase
 from exporter import EXPORT_FORMATS, ExportError, ExportOptions, export
 from ocr import PHOTO_EXTENSIONS, OcrError, engine_name, extract_text, photo_for_card, unavailable_message
 from parser import SUPPORTED_EXTENSIONS, Block, ParseError, build_sections, parse_file, text_to_blocks
+from lines import HEADING_SEP, heading_path, remove_line, split_lines
 from speech import Speaker, speakable
 
 APP_NAME = "Memory Palace"
@@ -1131,13 +1134,14 @@ class App(ctk.CTk):
         self.content.grid_rowconfigure(0, weight=1)
 
         self.views: dict[str, ctk.CTkFrame] = {
+            "read": ReadView(self.content, self),
             "review": ReviewView(self.content, self),
             "library": LibraryView(self.content, self),
             "tags": TagsView(self.content, self),
             "export": ExportView(self.content, self),
         }
         self.current_view = ""
-        self.show_view("review")
+        self.show_view("read")
 
         for key, action in (("<Right>", "know"), ("<Left>", "unknown"), ("<Down>", "delete"),
                             ("<Delete>", "delete")):
@@ -1153,12 +1157,13 @@ class App(ctk.CTk):
     def _build_sidebar(self):
         bar = ctk.CTkFrame(self, width=210, corner_radius=0)
         bar.grid(row=0, column=0, sticky="nsw")
-        bar.grid_rowconfigure(9, weight=1)
+        bar.grid_rowconfigure(10, weight=1)
         ctk.CTkLabel(bar, text="🏛  Memory Palace", font=ctk.CTkFont(FONT_FAMILY, 18, "bold")).grid(
             row=0, column=0, padx=18, pady=(20, 18), sticky="w")
         self.nav_buttons = {}
         for i, (key, label) in enumerate(
-            (("review", "🃏  Review"), ("library", "📚  Library"), ("tags", "🏷  Tags"), ("export", "📤  Export")),
+            (("read", "📖  Read"), ("review", "🃏  Review"), ("library", "📚  Library"), ("tags", "🏷  Tags"),
+             ("export", "📤  Export")),
             start=1,
         ):
             btn = ctk.CTkButton(bar, text=label, anchor="w", height=38, corner_radius=8,
@@ -1167,21 +1172,21 @@ class App(ctk.CTk):
             btn.grid(row=i, column=0, padx=12, pady=3, sticky="ew")
             self.nav_buttons[key] = btn
         ctk.CTkButton(bar, text="＋  Import documents…", height=38, anchor="w", command=self.import_documents).grid(
-            row=5, column=0, padx=12, pady=(18, 4), sticky="ew")
+            row=6, column=0, padx=12, pady=(18, 4), sticky="ew")
         ctk.CTkButton(bar, text="✎  New book…", height=38, anchor="w", command=self.new_book).grid(
-            row=6, column=0, padx=12, pady=4, sticky="ew")
+            row=7, column=0, padx=12, pady=4, sticky="ew")
         ctk.CTkButton(bar, text="📷  Cards from photos…", height=38, anchor="w",
-                      command=self.cards_from_photos).grid(row=7, column=0, padx=12, pady=4, sticky="ew")
+                      command=self.cards_from_photos).grid(row=8, column=0, padx=12, pady=4, sticky="ew")
         self.stats_label = ctk.CTkLabel(bar, text="", justify="left", anchor="w", font=self.fonts["small"])
-        self.stats_label.grid(row=8, column=0, padx=18, pady=8, sticky="w")
+        self.stats_label.grid(row=9, column=0, padx=18, pady=8, sticky="w")
         self.status_label = ctk.CTkLabel(bar, text="", justify="left", anchor="sw", wraplength=180,
                                          text_color=MUTED, font=self.fonts["small"])
-        self.status_label.grid(row=9, column=0, padx=18, pady=8, sticky="sw")
+        self.status_label.grid(row=10, column=0, padx=18, pady=8, sticky="sw")
         ctk.CTkButton(bar, text="🔊  Voice…", width=170, fg_color="gray45", hover_color="gray35",
-                      command=lambda: VoiceDialog(self, self)).grid(row=10, column=0, padx=12, pady=(0, 8))
+                      command=lambda: VoiceDialog(self, self)).grid(row=11, column=0, padx=12, pady=(0, 8))
         mode = ctk.CTkOptionMenu(bar, values=["System", "Light", "Dark"], command=self._set_appearance, width=170)
         mode.set("System")
-        mode.grid(row=11, column=0, padx=12, pady=(0, 16))
+        mode.grid(row=12, column=0, padx=12, pady=(0, 16))
 
     def _set_appearance(self, mode: str):
         ctk.set_appearance_mode(mode)
@@ -1252,16 +1257,21 @@ class App(ctk.CTk):
         self.after(80, self._drain_ui_queue)
 
     # -- keyboard ----------------------------------------------------------
-    def _review_key(self, action: str):
-        if self.current_view != "review":
-            return
+    def _typing(self) -> bool:
         focus = self.focus_get()
         if isinstance(focus, (tk.Entry, tk.Text, ttk.Entry)):
             try:
-                if str(focus.cget("state")) == "normal":
-                    return  # user is typing
+                return str(focus.cget("state")) == "normal"
             except tk.TclError:
                 pass
+        return False
+
+    def _review_key(self, action: str):
+        if self.current_view == "read" and action == "undo" and not self._typing():
+            self.views["read"].undo()  # type: ignore[attr-defined]
+            return
+        if self.current_view != "review" or self._typing():
+            return
         review: ReviewView = self.views["review"]  # type: ignore[assignment]
         if action == "undo":
             review.undo()
@@ -1920,6 +1930,347 @@ class ReviewView(ctk.CTkFrame):
             self.kb.remove_tag_from_section(self.current["id"], name)
             self.app.notify_data_changed(source="review")
             self._show_next()
+
+
+# ---------------------------------------------------------------------------
+# Read view (the main screen)
+# ---------------------------------------------------------------------------
+class ReadView(ctk.CTkFrame):
+    """Browse books by chapter and header, and read or prune their text.
+
+    The tree is built from the section headings' breadcrumbs ("Chapter 2 ›
+    Cells"). Selecting a book, chapter or header shows all the text under it,
+    as full text or line by line: one sentence per row with a ✕ at the start
+    that deletes it (Undo / Ctrl+Z brings it back). A single header in full
+    text is editable in place with a Save button.
+    """
+
+    MODES = ("Full text", "Line by line")
+    MAX_LINES = 3000  # a whole book can be huge; beyond this, pick a chapter
+
+    def __init__(self, master, app: App):
+        super().__init__(master, fg_color="transparent")
+        self.app, self.kb = app, app.kb
+        self.dirty = True
+        self.nodes: dict[str, tuple[int, tuple[str, ...]]] = {}  # tree iid -> (document id, heading path)
+        self._sections: dict[int, list[dict]] = {}               # document id -> active sections (cache)
+        self.current: str | None = None
+        self.editor: CardEditor | None = None
+        self.speak_btn: ctk.CTkButton | None = None
+        self.lines_text: tk.Text | None = None
+        self.line_refs: list[tuple[int, int]] = []               # row -> (section id, line index)
+        self.undo_stack: list[tuple[int, str, bool]] = []        # (section id, old text, card was removed)
+        self.grid_columnconfigure(0, weight=2, uniform="read")
+        self.grid_columnconfigure(1, weight=3, uniform="read")
+        self.grid_rowconfigure(1, weight=1)
+
+        bar = ctk.CTkFrame(self)
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        ctk.CTkLabel(bar, text="Show").pack(side="left", padx=(12, 6), pady=8)
+        self.mode = ctk.CTkSegmentedButton(bar, values=list(self.MODES), command=self._set_mode)
+        saved_mode = self.kb.get_setting("read_mode")
+        self._mode = saved_mode if saved_mode in self.MODES else self.MODES[1]
+        self.mode.set(self._mode)
+        self.mode.pack(side="left")
+        self.btn_undo = ctk.CTkButton(bar, text="↶ Undo delete (Ctrl+Z)", width=170, fg_color="gray45",
+                                      hover_color="gray35", command=self.undo, state="disabled")
+        self.btn_undo.pack(side="left", padx=12)
+        ctk.CTkLabel(bar, text="Click ✕ at the start of a line to delete it.", font=app.fonts["small"],
+                     text_color=MUTED).pack(side="right", padx=12)
+
+        frame, self.tree = make_tree(self, {"info": ("Cards", 60)}, "Chapters & headers")
+        frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.tree.bind("<<TreeviewOpen>>", self._on_open)
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        self.detail = ctk.CTkFrame(self)
+        self.detail.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.detail.grid_columnconfigure(0, weight=1)
+        self.detail.grid_rowconfigure(2, weight=1)
+
+    # -- tree ----------------------------------------------------------------
+    def on_show(self):
+        if self.dirty:
+            self.refresh()
+
+    def _sections_of(self, doc_id: int) -> list[dict]:
+        if doc_id not in self._sections:
+            self._sections[doc_id] = self.kb.get_sections(doc_id)
+        return self._sections[doc_id]
+
+    @staticmethod
+    def _path(s: dict) -> tuple[str, ...]:
+        fallback = (s["content_text"] or "").strip().split("\n")[0][:60] or "(image)"
+        return heading_path(s["heading"], fallback)
+
+    def refresh(self):
+        """Rebuild the tree from the database, keeping what was open and selected."""
+        self.dirty = False
+        self._sections.clear()
+        opened = {key for iid, key in self.nodes.items() if self.tree.exists(iid) and self.tree.item(iid, "open")}
+        selected = self.nodes.get(self.current) if self.current else None
+        wanted = opened | ({selected} if selected else set())
+        self.tree.delete(*self.tree.get_children())
+        self.nodes.clear()
+        for d in self.kb.list_documents():
+            iid = f"d{d['id']}"
+            self.nodes[iid] = (d["id"], ())
+            self.tree.insert("", "end", iid=iid, text=d["title"], values=(d["active_count"] or 0,), tags=("doc",))
+            if any(key[0] == d["id"] for key in wanted):
+                self._load_children(iid)
+            else:
+                self.tree.insert(iid, "end", iid=f"{iid}.x", text="loading…")  # lazy placeholder
+        for iid, key in self.nodes.items():
+            if key in opened:
+                self.tree.item(iid, open=True)
+        target = next((i for i, key in self.nodes.items() if key == selected), None)
+        if target is None and selected and f"d{selected[0]}" in self.nodes:
+            target = f"d{selected[0]}"  # header gone (e.g. renamed): fall back to its book
+        if target:
+            self.current = target
+            self.tree.selection_set(target)
+            self.tree.see(target)
+            self.show(target, keep_scroll=True)
+        else:
+            self.current = None
+            self._placeholder()
+
+    def _load_children(self, doc_iid: str):
+        doc_id = self.nodes[doc_iid][0]
+        self.tree.delete(*self.tree.get_children(doc_iid))
+        for iid in [i for i in self.nodes if i.startswith(doc_iid + ".")]:
+            del self.nodes[iid]
+        by_path: dict[tuple[str, ...], str] = {(): doc_iid}
+        counts: dict[tuple[str, ...], int] = {}
+        for s in self._sections_of(doc_id):
+            path = self._path(s)
+            for depth in range(1, len(path) + 1):
+                prefix = path[:depth]
+                counts[prefix] = counts.get(prefix, 0) + 1
+                if prefix not in by_path:
+                    iid = f"{doc_iid}.{len(by_path)}"
+                    by_path[prefix] = iid
+                    self.nodes[iid] = (doc_id, prefix)
+                    self.tree.insert(by_path[prefix[:-1]], "end", iid=iid, text=prefix[-1])
+        for prefix, iid in by_path.items():
+            if prefix:
+                self.tree.set(iid, "info", counts[prefix])
+
+    def _on_open(self, _event):
+        iid = self.tree.focus()
+        if self.tree.exists(f"{iid}.x"):
+            self._load_children(iid)
+
+    def _on_select(self, _event):
+        sel = self.tree.selection()
+        if not sel or sel[0] not in self.nodes or sel[0] == self.current:
+            return
+        if self.editor is not None and not self.editor.confirm_leave():
+            if self.current and self.tree.exists(self.current):
+                self.tree.selection_set(self.current)  # stay on the card being edited
+            return
+        self.editor = None
+        self.show(sel[0])
+
+    # -- detail pane ---------------------------------------------------------
+    def _clear_detail(self):
+        if self.editor is not None:
+            self.editor.confirm_leave(cancel=False)  # offer to save edits before they go
+            self.editor = None
+        if self.speak_btn is not None:
+            self.app.stop_speech(self.speak_btn)  # only if this pane was reading
+            self.speak_btn = None
+        for w in self.detail.winfo_children():
+            w.destroy()
+        self.lines_text = None
+        self.line_refs = []
+
+    def _placeholder(self):
+        self._clear_detail()
+        if self.nodes:
+            msg = "Select a book, chapter or header on the left."
+        else:
+            msg = ("Your palace is empty.\n\nImport a PDF, EPUB, Word, Markdown or text file,\n"
+                   "write your own cards in a new book, or turn photos into cards.")
+        ctk.CTkLabel(self.detail, text=msg, text_color=MUTED, justify="center").grid(row=0, column=0, pady=40)
+
+    def _set_mode(self, mode: str):
+        if mode == self._mode:
+            return
+        if self.editor is not None and not self.editor.confirm_leave():
+            self.mode.set(self._mode)
+            return
+        self.editor = None
+        self._mode = mode
+        self.kb.set_setting("read_mode", mode)
+        if self.current:
+            self.show(self.current)
+
+    def show(self, iid: str, keep_scroll: bool = False):
+        doc_id, prefix = self.nodes[iid]
+        scroll = self.lines_text.yview()[0] if keep_scroll and self.lines_text and iid == self.current else None
+        self._clear_detail()
+        self.current = iid
+        self._update_undo()
+        sections = [s for s in self._sections_of(doc_id) if self._path(s)[:len(prefix)] == prefix]
+        book = self.tree.item(f"d{doc_id}", "text")
+        title = HEADING_SEP.join(prefix) or book
+        ctk.CTkLabel(self.detail, text=title, font=self.app.fonts["h2"], anchor="w", justify="left",
+                     wraplength=560).grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 0))
+        info = ctk.CTkFrame(self.detail, fg_color="transparent")
+        info.grid(row=1, column=0, sticky="ew", padx=14, pady=(2, 0))
+        meta = book if prefix else ""
+        meta += f"{' · ' if meta else ''}{len(sections)} card{'s' * (len(sections) != 1)}"
+        full_text = self._mode == self.MODES[0]
+        if full_text and len(sections) > 1:
+            meta += " · select a single header to edit it"
+        ctk.CTkLabel(info, text=meta, text_color=MUTED, font=self.app.fonts["small"]).pack(side="left")
+        if not sections:
+            ctk.CTkLabel(self.detail, text="Nothing here.", text_color=MUTED).grid(row=2, column=0, pady=40)
+            return
+        self.speak_btn = ctk.CTkButton(info, text="🔊 Read", width=72, height=26)
+        self.speak_btn.pack(side="right")
+
+        if full_text and len(sections) == 1:
+            editor = CardEditor(self.detail, self.app, sections[0], on_saved=lambda _sid: self._after_edit(True))
+            editor.grid(row=2, column=0, sticky="nsew", padx=14, pady=(8, 12))
+            self.editor = editor
+            speak = lambda: (editor.get_heading(), editor.get_text())  # noqa: E731
+        else:
+            self._render_text(sections, prefix, lines=not full_text)
+            if scroll is not None:
+                self.lines_text.yview_moveto(scroll)
+            text = "\n\n".join(s["content_text"] for s in sections if s["content_text"])
+            speak = lambda: (title, text)  # noqa: E731
+        self.speak_btn.configure(command=lambda b=self.speak_btn: self.app.toggle_speech(*speak(), b))
+
+    def _render_text(self, sections: list[dict], prefix: tuple[str, ...], lines: bool):
+        """All the text under the selected node, with sub-headers. ``lines``
+        puts each sentence on its own row behind a clickable ✕."""
+        box = ctk.CTkTextbox(self.detail, wrap="word", font=self.app.fonts["body"], border_spacing=8)
+        box.grid(row=2, column=0, sticky="nsew", padx=14, pady=(8, 12))
+        t: tk.Text = box._textbox  # tag fonts must be set on the Tk widget (CTk forbids them)
+        self.lines_text = t
+        try:
+            scale = ctk.ScalingTracker.get_widget_scaling(self)
+        except Exception:
+            scale = 1.0
+        px = lambda n: round(n * scale)  # noqa: E731
+        t.tag_configure("head", font=(FONT_FAMILY, -px(16), "bold"), spacing1=px(14), spacing3=px(6))
+        t.tag_configure("note", foreground="gray55", font=(FONT_FAMILY, -px(12), "italic"))
+        t.tag_configure("line", lmargin2=px(30), spacing1=px(3), spacing3=px(3))  # wrapped text hangs past the ✕
+        t.tag_configure("para", spacing3=px(10))
+        t.tag_configure("x", foreground="gray55")
+        t.tag_configure("hot", foreground=RED)
+        t.tag_raise("hot")
+        t.tag_bind("x", "<Enter>", lambda e: self._hover(e, True))
+        t.tag_bind("x", "<Leave>", lambda e: self._hover(e, False))
+        t.tag_bind("x", "<Button-1>", self._on_cross)
+
+        last: tuple[str, ...] | None = None
+        count = 0
+        for s in sections:
+            sub = self._path(s)[len(prefix):]
+            if sub and sub != last:
+                t.insert("end", HEADING_SEP.join(sub) + "\n", "head")
+            last = sub
+            if not lines:
+                if s["content_text"]:
+                    t.insert("end", s["content_text"] + "\n", "para")
+            else:
+                for i, line in enumerate(split_lines(s["content_text"] or "")):
+                    if count >= self.MAX_LINES:
+                        break
+                    t.insert("end", "✕", ("x", f"L{count}", "line"))
+                    t.insert("end", f"  {line}\n", "line")
+                    self.line_refs.append((s["id"], i))
+                    count += 1
+            if s["image_paths"]:
+                t.insert("end", f"🖼 {len(s['image_paths'])} image(s): select this header in Full text to see them\n",
+                         "note")
+            if count >= self.MAX_LINES:
+                t.insert("end", f"\nShowing the first {self.MAX_LINES} lines. Select a chapter to see the rest.\n",
+                         "note")
+                break
+        box.configure(state="disabled")
+
+    def _line_at(self, event) -> int | None:
+        t = self.lines_text
+        if t is None:
+            return None
+        for tag in t.tag_names(t.index(f"@{event.x},{event.y}")):
+            if tag.startswith("L") and tag[1:].isdigit():
+                return int(tag[1:])
+        return None
+
+    def _hover(self, event, on: bool):
+        t = self.lines_text
+        if t is None:
+            return
+        t.tag_remove("hot", "1.0", "end")
+        t.configure(cursor="hand2" if on else "xterm")
+        n = self._line_at(event) if on else None
+        if n is not None:
+            t.tag_add("hot", *t.tag_ranges(f"L{n}")[:2])
+
+    # -- edits ---------------------------------------------------------------
+    def _on_cross(self, event):
+        n = self._line_at(event)
+        if n is None or n >= len(self.line_refs):
+            return
+        self.delete_line(n)
+
+    def delete_line(self, n: int):
+        """Delete the ``n``-th line shown; the card's last line removes the card."""
+        sid, index = self.line_refs[n]
+        s = self.kb.get_section(sid)
+        if not s:
+            return
+        old = s["content_text"] or ""
+        try:
+            new = remove_line(old, index)
+        except IndexError:  # text changed underneath; just redraw
+            self._after_edit(False)
+            return
+        removed = not new and not s["image_paths"]
+        if removed:  # Undo brings the card back too
+            self.kb.soft_delete_section(sid)
+            self.app.set_status("Deleted the card's last line, so the card was removed. Ctrl+Z undoes.")
+        else:
+            self.kb.update_section(sid, s["heading"] or "", new)
+        self.undo_stack.append((sid, old, removed))
+        del self.undo_stack[:-200]
+        self._after_edit(removed)
+
+    def undo(self):
+        if not self.undo_stack:
+            return
+        sid, old, removed = self.undo_stack.pop()
+        s = self.kb.get_section(sid)
+        if not s:  # purged since
+            self.app.set_status("That card no longer exists, so the line can't be restored.")
+            self._update_undo()
+            return
+        self.kb.update_section(sid, s["heading"] or "", old)
+        if removed:
+            self.kb.restore_section(sid)
+        self.app.set_status("Restored the deleted line.")
+        self._after_edit(removed)
+
+    def _update_undo(self):
+        self.btn_undo.configure(state="normal" if self.undo_stack else "disabled")
+
+    def _after_edit(self, structure_changed: bool):
+        """Text changed here: tell the other views, then redraw this one."""
+        self.editor = None  # saved already; nothing to ask about while the pane reloads
+        self.app.notify_data_changed(source="read")
+        if structure_changed:  # cards came or went, or a heading changed: rebuild the tree
+            self.refresh()
+            return
+        self.dirty = False
+        self._sections.clear()
+        if self.current:
+            self.show(self.current, keep_scroll=True)
 
 
 # ---------------------------------------------------------------------------

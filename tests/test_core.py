@@ -435,3 +435,21 @@ def test_speakable_text():
     from speech import speakable
     assert speakable("Ch. 2 › Cells", "**Bold** text.") == "Ch. 2. Cells.\n\nBold text"
     assert speakable(None, "") == ""
+
+
+def test_lines_split_and_remove():
+    from lines import heading_path, remove_line, split_lines
+
+    text = ("Cells are small. Every cell has a membrane, e.g. lipids! Plant cells differ?\n\n"
+            "1. First item here.\n2. Second item.\n\nMr. Smith said so. The end")
+    assert split_lines(text) == [
+        "Cells are small.", "Every cell has a membrane, e.g. lipids!", "Plant cells differ?",
+        "1. First item here.", "2. Second item.", "Mr. Smith said so.", "The end",
+    ]
+    # Removing a sentence leaves the rest of the text exactly as it was.
+    assert remove_line(text, 2).startswith("Cells are small. Every cell has a membrane, e.g. lipids!\n\n1.")
+    assert "1. First item here.\n" not in remove_line(text, 3)
+    assert remove_line(text, 3).count("\n\n") == 2
+    assert remove_line("Only one.", 0) == ""
+    assert heading_path("Ch 2 › Cells (part 3)", "Book") == ("Ch 2", "Cells")
+    assert heading_path(None, "Book") == ("Book",)
