@@ -385,6 +385,23 @@ def test_manual_book_cards_images_and_settings(kb):
     kb.update_section(second, "Diagram", "Labelled", [])
     assert kb.get_section(second)["image_paths"] == [] and not kb.abs_path(rel).exists()
 
+    # Splitting a card puts the second half right after it, with the same heading and manual tags.
+    third = kb.add_section(doc_id, "Q3", "Last")
+    kb.add_tag_to_section(first, "biology")
+    with pytest.raises(ValueError):
+        kb.split_section(first, "only one half", "  ")
+    new = kb.split_section(first, "What makes ATP?", "The mitochondria.")
+    assert [s["id"] for s in kb.get_sections(doc_id)] == [first, new, second, third]
+    split = kb.get_section(new)
+    assert split["heading"] == "Q1" and split["content_text"] == "The mitochondria."
+    assert set(split["tags"]) == {"biology", "mitochondria"}
+    assert kb.get_section(first)["content_text"] == "What makes ATP?"
+    assert new in kb.get_review_queue(document_id=doc_id)
+
+    # A new card can be placed right after an existing one instead of at the end.
+    inserted = kb.add_section(doc_id, "Q1b", "Inserted", after=first)
+    assert [s["id"] for s in kb.get_sections(doc_id)] == [first, inserted, new, second, third]
+
     kb.set_setting("tts_rate", "3")
     kb.set_setting("tts_rate", "-2")
     assert kb.get_setting("tts_rate") == "-2" and kb.get_setting("missing", "x") == "x"

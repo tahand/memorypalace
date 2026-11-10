@@ -385,18 +385,32 @@ class KnowledgeBase:
         content_text: str,
         image_paths: Iterable[str] = (),
         auto_tag: bool = True,
+        after: int | None = None,
     ) -> int:
-        """Append a card to the end of a document. Returns the new section id."""
+        """Add a card to a document, at the end or right after section ``after``.
+        Returns the new section id."""
         content_text = (content_text or "").strip()
         image_paths = list(image_paths)
         if not content_text and not image_paths:
             raise ValueError("A card needs some text or at least one image")
         if not self.get_document(document_id):
             raise ValueError(f"No document with id {document_id}")
+        prev = self.conn.execute(
+            "SELECT sequence_order FROM sections WHERE id = ? AND document_id = ?", (after, document_id)
+        ).fetchone() if after is not None else None
         with self.conn:
-            order = self.conn.execute(
-                "SELECT COALESCE(MAX(sequence_order) + 1, 0) FROM sections WHERE document_id = ?", (document_id,)
-            ).fetchone()[0]
+            if prev:
+                order = prev["sequence_order"] + 1
+                self.conn.execute(
+                    "UPDATE sections SET sequence_order = sequence_order + 1"
+                    " WHERE document_id = ? AND sequence_order >= ?",
+                    (document_id, order),
+                )
+            else:
+                order = self.conn.execute(
+                    "SELECT COALESCE(MAX(sequence_order) + 1, 0) FROM sections WHERE document_id = ?",
+                    (document_id,),
+                ).fetchone()[0]
             cur = self.conn.execute(
                 "INSERT INTO sections (document_id, sequence_order, heading, content_text, image_paths)"
                 " VALUES (?, ?, ?, ?, ?)",
@@ -533,6 +547,27 @@ class KnowledgeBase:
                 "UPDATE sections SET image_paths = ? WHERE id = ?", (json.dumps(list(image_paths)), section_id)
             )
         self._delete_unused_images(set(old) - set(image_paths))
+
+    def split_section(self, section_id: int, before: str, after: str, heading: str | None = None) -> int:
+        """Split a card in two: it keeps ``before`` and its images, and a new
+        card with ``after`` is placed right after it with the same heading and
+        manual tags. Returns the new section id."""
+        before, after = (before or "").strip(), (after or "").strip()
+        if not before or not after:
+            raise ValueError("Both parts of a split card need some text")
+        sec = self.get_section(section_id)
+        if not sec:
+            raise ValueError(f"No section with id {section_id}")
+        heading = (sec["heading"] or "") if heading is None else heading
+        self.update_section(section_id, heading, before)
+        new_id = self.add_section(sec["document_id"], heading, after, after=section_id)
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO section_tags (section_id, tag_id, source)"
+                " SELECT ?, tag_id, 'manual' FROM section_tags WHERE section_id = ? AND source = 'manual'",
+                (new_id, section_id),
+            )
+        return new_id
 
     def soft_delete_section(self, section_id: int) -> None:
         with self.conn:
