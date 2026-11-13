@@ -18,6 +18,7 @@ synced or backed up as a unit.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -385,18 +386,32 @@ class KnowledgeBase:
         content_text: str,
         image_paths: Iterable[str] = (),
         auto_tag: bool = True,
+        after: int | None = None,
     ) -> int:
-        """Append a card to the end of a document. Returns the new section id."""
+        """Add a card to a document, at the end or right after section ``after``.
+        Returns the new section id."""
         content_text = (content_text or "").strip()
         image_paths = list(image_paths)
         if not content_text and not image_paths:
             raise ValueError("A card needs some text or at least one image")
         if not self.get_document(document_id):
             raise ValueError(f"No document with id {document_id}")
+        prev = self.conn.execute(
+            "SELECT sequence_order FROM sections WHERE id = ? AND document_id = ?", (after, document_id)
+        ).fetchone() if after is not None else None
         with self.conn:
-            order = self.conn.execute(
-                "SELECT COALESCE(MAX(sequence_order) + 1, 0) FROM sections WHERE document_id = ?", (document_id,)
-            ).fetchone()[0]
+            if prev:
+                order = prev["sequence_order"] + 1
+                self.conn.execute(
+                    "UPDATE sections SET sequence_order = sequence_order + 1"
+                    " WHERE document_id = ? AND sequence_order >= ?",
+                    (document_id, order),
+                )
+            else:
+                order = self.conn.execute(
+                    "SELECT COALESCE(MAX(sequence_order) + 1, 0) FROM sections WHERE document_id = ?",
+                    (document_id,),
+                ).fetchone()[0]
             cur = self.conn.execute(
                 "INSERT INTO sections (document_id, sequence_order, heading, content_text, image_paths)"
                 " VALUES (?, ?, ?, ?, ?)",
@@ -468,6 +483,60 @@ class KnowledgeBase:
             if self.media_root in media.parents:
                 shutil.rmtree(media, ignore_errors=True)
 
+    @staticmethod
+    def _path_key(file_path: str | Path) -> str:
+        return os.path.normcase(os.path.abspath(str(file_path)))
+
+    def find_documents_by_path(self, file_path: str | Path) -> list[dict]:
+        """Documents imported from ``file_path`` (any version of that file)."""
+        key = self._path_key(file_path)
+        return [d for d in self.list_documents() if d.get("file_path") and self._path_key(d["file_path"]) == key]
+
+    def replace_document(self, old_id: int, new_id: int) -> int:
+        """Swap an earlier import for a new version of the same file.
+
+        Cards whose text is unchanged keep their review progress and manual
+        tags, the new document takes over the old title and author (which may
+        have been renamed in the app), and the old document is deleted.
+        Returns how many cards kept their progress.
+        """
+        old = self.get_document(old_id)
+        if not old or not self.get_document(new_id):
+            return 0
+        progress: dict[str, tuple] = {}
+        for row in self.conn.execute(
+            "SELECT s.id, s.content_text, r.ease_factor, r.interval, r.repetitions, r.next_review_date,"
+            "       r.last_reviewed_at, r.status"
+            " FROM sections s JOIN reviews r ON r.section_id = s.id"
+            " WHERE s.document_id = ? AND s.status = 'active'",
+            (old_id,),
+        ):
+            progress.setdefault(row["content_text"].strip(), tuple(row))
+        kept = 0
+        with self.conn:
+            for sec in self.conn.execute(
+                "SELECT id, content_text FROM sections WHERE document_id = ? AND status = 'active'", (new_id,)
+            ).fetchall():
+                match = progress.pop(sec["content_text"].strip(), None)
+                if not match:
+                    continue
+                old_sid, _, ease, interval, reps, due, last, status = match
+                self.conn.execute(
+                    "UPDATE reviews SET ease_factor = ?, interval = ?, repetitions = ?, next_review_date = ?,"
+                    " last_reviewed_at = ?, status = ? WHERE section_id = ?",
+                    (ease, interval, reps, due, last, status, sec["id"]),
+                )
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO section_tags (section_id, tag_id, source)"
+                    " SELECT ?, tag_id, source FROM section_tags WHERE section_id = ? AND source = 'manual'",
+                    (sec["id"], old_sid),
+                )
+                kept += 1
+            self.conn.execute("UPDATE documents SET title = ?, author = ? WHERE id = ?",
+                              (old["title"], old["author"], new_id))
+        self.delete_document(old_id)
+        return kept
+
     # -- sections ----------------------------------------------------------
     @staticmethod
     def _section_dict(row: sqlite3.Row) -> dict:
@@ -533,6 +602,27 @@ class KnowledgeBase:
                 "UPDATE sections SET image_paths = ? WHERE id = ?", (json.dumps(list(image_paths)), section_id)
             )
         self._delete_unused_images(set(old) - set(image_paths))
+
+    def split_section(self, section_id: int, before: str, after: str, heading: str | None = None) -> int:
+        """Split a card in two: it keeps ``before`` and its images, and a new
+        card with ``after`` is placed right after it with the same heading and
+        manual tags. Returns the new section id."""
+        before, after = (before or "").strip(), (after or "").strip()
+        if not before or not after:
+            raise ValueError("Both parts of a split card need some text")
+        sec = self.get_section(section_id)
+        if not sec:
+            raise ValueError(f"No section with id {section_id}")
+        heading = (sec["heading"] or "") if heading is None else heading
+        self.update_section(section_id, heading, before)
+        new_id = self.add_section(sec["document_id"], heading, after, after=section_id)
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO section_tags (section_id, tag_id, source)"
+                " SELECT ?, tag_id, 'manual' FROM section_tags WHERE section_id = ? AND source = 'manual'",
+                (new_id, section_id),
+            )
+        return new_id
 
     def soft_delete_section(self, section_id: int) -> None:
         with self.conn:

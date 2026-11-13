@@ -37,6 +37,25 @@ python main.py
 
 Python 3.10+ is required. Tested on 3.14.
 
+## Workflow: three tabs
+
+The window has three tabs along the top, one per step:
+
+1. **① Convert to Word.** Choose your originals (`.pdf` `.epub` `.doc` `.docx` `.txt` `.md`).
+   Each one is copied into a Word file in the **Word copies** folder (next to the `data` folder;
+   *Change folder…* picks another). The copy stays as close to the original as possible:
+   PDFs are rebuilt page by page with their layout, fonts, tables and images (`pdf2docx`);
+   EPUBs keep headings, bold/italic, lists, quotes, tables and images, with a page break per
+   chapter. Chapter titles are given a Word outline level (from the PDF's bookmarks, or from
+   large or bold type), so they show in Word's navigation pane and become card headings later.
+   Double-click a file to open it in Word.
+2. **② Add edited files.** Edit and cut the Word copies down in Word, save, then add them here.
+   Each file shows whether it is *not added yet*, *in the palace*, or *edited since it was added*.
+   Adding a newer version of a file asks whether to **replace** the old book: unchanged cards keep
+   their review progress and tags, the book keeps its name, and the rest of the old cards go.
+   When the import finishes you are taken to the third tab.
+3. **③ Memory Palace.** The app as before, opening on **Review** (spaced repetition).
+
 ## Features
 
 | Area | What it does |
@@ -45,8 +64,9 @@ Python 3.10+ is required. Tested on 3.14.
 | **Your own cards** | **New book…** creates an empty book. **＋ Add card** (Library, on a book) opens a card editor: a heading (the question), text (the answer) and any number of images. *Save & add another* keeps the editor open for fast entry. Any card, imported or your own, can be edited the same way, including adding or removing images. |
 | **Cards from photos** | Pick one photo or a whole series (notes, book pages, slides, whiteboards). Text is read from each photo with **offline OCR**, and you can correct it before saving. Make *one card per photo*, *all photos → one card*, or *pages → split at headings*: photos of consecutive book pages are joined, and a new card starts at each heading. The photo itself can be shown on the card, turned upright using its EXIF orientation and downscaled to 2,000 px. The card editor's **📷 Extract text from images** does the same for a single card. |
 | **Read aloud** | **🔊 Read** on a card (or **R** in Review) speaks the heading and text with your computer's built-in voices. Tick *Read aloud* in Review to hear every card as it appears. In recall mode only the question is read until you reveal the answer. **🔊 Voice…** in the sidebar picks the voice and speed. |
-| **Review** | One card at a time. **Swipe/drag right** or **→** = *I know* (SM-2 interval grows). **Left** or **←** = *I don't know* (reset; card goes to the back of today's queue). **Down** or **↓/Del** = *Delete* (soft delete, restorable). **Ctrl+Z** undoes. *Recall mode* hides the text until you press **Space**. Filter by document or tag; cap new cards per session. |
-| **Library** | Browse and search documents and sections; rename books, edit card text, restore or purge deleted cards, delete documents. |
+| **Read** (main screen) | Browse each book by **chapter and sub-header** in a tree. Select a book, chapter or header to see all the text under it. *Line by line* shows one sentence per row with a **✕** at the start: click it to delete that sentence (deleting a card's last line removes the card); **↶ Undo / Ctrl+Z** brings it back. *Full text* shows the text as written, and a single header there is editable with **💾 Save**. |
+| **Review** (optional) | Spaced repetition, one card at a time. **Swipe/drag right** or **→** = *I know* (SM-2 interval grows). **Left** or **←** = *I don't know* (reset; card goes to the back of today's queue). **Down** or **↓/Del** = *Delete* (soft delete, restorable). **Ctrl+Z** undoes. The card is editable right on screen: change the heading, text or images and press **💾 Save** (or **Ctrl+S**); you're asked before unsaved changes are lost. *Recall mode* hides the text until you press **Space**. Filter by document or tag; cap new cards per session. |
+| **Library** | Browse and search documents and sections; rename books, edit cards right in the detail pane and press **💾 Save** (or Ctrl+S) — split a card in two at the cursor, or add a new card right after it, restore or purge deleted cards, delete documents. |
 | **Tags** | Tag a section or a whole document. When you create a **new** tag, the app offers to apply it to every other section that mentions it. Tags can match a keyword (whole word, any case) or a **regex**. *Run auto-tagging* re-applies every tag to the whole library, and new imports are auto-tagged with your existing tags. |
 | **Export** | PDF (with bookmarks and Unicode fonts), DOCX, Markdown (images copied to a `_media` folder) or TXT. Export everything, or tick books and sections in the tree. Filter by *reviewed/known*, *mastered* or tag. Images are embedded. |
 
@@ -66,6 +86,7 @@ because the exe is built without a console.
 ## Command line
 
 ```bash
+python main.py convert book.pdf notes.epub    # Word copies into the 'Word copies' folder (--out DIR)
 python main.py import book.epub notes.md     # import without the GUI
 python main.py export all.pdf                 # everything
 python main.py export known.docx --reviewed known --tag biology
@@ -78,9 +99,11 @@ python main.py --data D:\palace ...           # use another data folder
 
 ```
 main.py      entry point, dependency check, CLI
-ui.py        CustomTkinter desktop UI (Review / Library / Tags / Export + card, photo and voice dialogs)
+ui.py        CustomTkinter desktop UI (Convert / Add tabs; Read / Review / Library / Tags / Export + card, photo and voice dialogs)
+lines.py     Splits card text into sentences for the Read view's line-by-line mode
 db.py        SQLite schema, queries, tagging (regex runs inside SQLite), SM-2, settings
 parser.py    format extractors → common block stream → section chunker
+converter.py originals → editable Word copies (pdf2docx for PDFs, EPUB HTML rebuilt in Word)
 ocr.py       photo clean-up (EXIF rotation, resize) and OCR: Windows OCR, else Tesseract
 speech.py    offline text-to-speech: Windows SAPI, macOS `say`, Linux espeak-ng
 exporter.py  PDF (reportlab), DOCX (python-docx), Markdown, TXT
