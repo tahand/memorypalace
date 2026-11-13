@@ -2,6 +2,7 @@
 main.py - Entry point for Memory Palace.
 
     python main.py                      # launch the desktop app
+    python main.py convert FILE [FILE…] [--out DIR]  # make editable Word copies
     python main.py import FILE [FILE…]  # import from the command line
     python main.py export OUT.pdf [--format pdf|docx|md|txt] [--reviewed known|mastered]
                                   [--document ID …] [--tag NAME] [--title TEXT] [--no-images]
@@ -32,6 +33,7 @@ DEPENDENCIES = [
     ("ebooklib", "EbookLib", "EPUB import"),
     ("bs4", "beautifulsoup4", "EPUB import"),
     ("docx", "python-docx", "DOCX import and export"),
+    ("pdf2docx", "pdf2docx", "converting PDFs to Word with their layout"),
     ("reportlab", "reportlab", "PDF export"),
 ]
 if sys.platform == "win32":
@@ -93,6 +95,31 @@ def cmd_gui(args) -> int:
     finally:
         kb.close()
     return 0
+
+
+def cmd_convert(args) -> int:
+    from converter import convert_to_docx
+    from parser import ParseError
+
+    out_dir = args.out
+    if out_dir is None:
+        kb = open_kb(args.data)
+        saved = kb.get_setting("word_folder")
+        kb.close()
+        out_dir = Path(saved) if saved else args.data.resolve().parent / "Word copies"
+    failures = 0
+    for name in args.files:
+        path = Path(name)
+        try:
+            result = convert_to_docx(path, out_dir)
+        except (ParseError, OSError) as exc:
+            failures += 1
+            print(f"FAIL  {path.name}: {exc}", file=sys.stderr)
+            continue
+        print(f"ok    {path.name} -> {result.output}  ({result.method})")
+        for w in result.warnings:
+            print(f"      note: {w}")
+    return 1 if failures else 0
 
 
 def cmd_import(args) -> int:
@@ -173,6 +200,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--data", type=Path, default=APP_DIR / "data",
                    help="data directory (default: 'data' next to main.py or the .exe)")
     sub = p.add_subparsers(dest="command")
+
+    conv = sub.add_parser("convert", help="make editable Word copies of documents")
+    conv.add_argument("files", nargs="+")
+    conv.add_argument("--out", type=Path, help="folder for the Word copies (default: the app's 'Word copies' folder)")
+    conv.set_defaults(func=cmd_convert)
 
     imp = sub.add_parser("import", help="import documents")
     imp.add_argument("files", nargs="+")

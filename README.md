@@ -37,6 +37,25 @@ python main.py
 
 Python 3.10+ is required. Tested on 3.14.
 
+## Workflow: three tabs
+
+The window has three tabs along the top, one per step:
+
+1. **① Convert to Word.** Choose your originals (`.pdf` `.epub` `.doc` `.docx` `.txt` `.md`).
+   Each one is copied into a Word file in the **Word copies** folder (next to the `data` folder;
+   *Change folder…* picks another). The copy stays as close to the original as possible:
+   PDFs are rebuilt page by page with their layout, fonts, tables and images (`pdf2docx`);
+   EPUBs keep headings, bold/italic, lists, quotes, tables and images, with a page break per
+   chapter. Chapter titles are given a Word outline level (from the PDF's bookmarks, or from
+   large or bold type), so they show in Word's navigation pane and become card headings later.
+   Double-click a file to open it in Word.
+2. **② Add edited files.** Edit and cut the Word copies down in Word, save, then add them here.
+   Each file shows whether it is *not added yet*, *in the palace*, or *edited since it was added*.
+   Adding a newer version of a file asks whether to **replace** the old book: unchanged cards keep
+   their review progress and tags, the book keeps its name, and the rest of the old cards go.
+   When the import finishes you are taken to the third tab.
+3. **③ Memory Palace.** The app as before, opening on **Review** (spaced repetition).
+
 ## Features
 
 | Area | What it does |
@@ -67,6 +86,7 @@ because the exe is built without a console.
 ## Command line
 
 ```bash
+python main.py convert book.pdf notes.epub    # Word copies into the 'Word copies' folder (--out DIR)
 python main.py import book.epub notes.md     # import without the GUI
 python main.py export all.pdf                 # everything
 python main.py export known.docx --reviewed known --tag biology
@@ -79,10 +99,11 @@ python main.py --data D:\palace ...           # use another data folder
 
 ```
 main.py      entry point, dependency check, CLI
-ui.py        CustomTkinter desktop UI (Read / Review / Library / Tags / Export + card, photo and voice dialogs)
+ui.py        CustomTkinter desktop UI (Convert / Add tabs; Read / Review / Library / Tags / Export + card, photo and voice dialogs)
 lines.py     Splits card text into sentences for the Read view's line-by-line mode
 db.py        SQLite schema, queries, tagging (regex runs inside SQLite), SM-2, settings
 parser.py    format extractors → common block stream → section chunker
+converter.py originals → editable Word copies (pdf2docx for PDFs, EPUB HTML rebuilt in Word)
 ocr.py       photo clean-up (EXIF rotation, resize) and OCR: Windows OCR, else Tesseract
 speech.py    offline text-to-speech: Windows SAPI, macOS `say`, Linux espeak-ng
 exporter.py  PDF (reportlab), DOCX (python-docx), Markdown, TXT

@@ -18,6 +18,7 @@ synced or backed up as a unit.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -481,6 +482,60 @@ class KnowledgeBase:
             # Only delete inside our own media root.
             if self.media_root in media.parents:
                 shutil.rmtree(media, ignore_errors=True)
+
+    @staticmethod
+    def _path_key(file_path: str | Path) -> str:
+        return os.path.normcase(os.path.abspath(str(file_path)))
+
+    def find_documents_by_path(self, file_path: str | Path) -> list[dict]:
+        """Documents imported from ``file_path`` (any version of that file)."""
+        key = self._path_key(file_path)
+        return [d for d in self.list_documents() if d.get("file_path") and self._path_key(d["file_path"]) == key]
+
+    def replace_document(self, old_id: int, new_id: int) -> int:
+        """Swap an earlier import for a new version of the same file.
+
+        Cards whose text is unchanged keep their review progress and manual
+        tags, the new document takes over the old title and author (which may
+        have been renamed in the app), and the old document is deleted.
+        Returns how many cards kept their progress.
+        """
+        old = self.get_document(old_id)
+        if not old or not self.get_document(new_id):
+            return 0
+        progress: dict[str, tuple] = {}
+        for row in self.conn.execute(
+            "SELECT s.id, s.content_text, r.ease_factor, r.interval, r.repetitions, r.next_review_date,"
+            "       r.last_reviewed_at, r.status"
+            " FROM sections s JOIN reviews r ON r.section_id = s.id"
+            " WHERE s.document_id = ? AND s.status = 'active'",
+            (old_id,),
+        ):
+            progress.setdefault(row["content_text"].strip(), tuple(row))
+        kept = 0
+        with self.conn:
+            for sec in self.conn.execute(
+                "SELECT id, content_text FROM sections WHERE document_id = ? AND status = 'active'", (new_id,)
+            ).fetchall():
+                match = progress.pop(sec["content_text"].strip(), None)
+                if not match:
+                    continue
+                old_sid, _, ease, interval, reps, due, last, status = match
+                self.conn.execute(
+                    "UPDATE reviews SET ease_factor = ?, interval = ?, repetitions = ?, next_review_date = ?,"
+                    " last_reviewed_at = ?, status = ? WHERE section_id = ?",
+                    (ease, interval, reps, due, last, status, sec["id"]),
+                )
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO section_tags (section_id, tag_id, source)"
+                    " SELECT ?, tag_id, source FROM section_tags WHERE section_id = ? AND source = 'manual'",
+                    (sec["id"], old_sid),
+                )
+                kept += 1
+            self.conn.execute("UPDATE documents SET title = ?, author = ? WHERE id = ?",
+                              (old["title"], old["author"], new_id))
+        self.delete_document(old_id)
+        return kept
 
     # -- sections ----------------------------------------------------------
     @staticmethod

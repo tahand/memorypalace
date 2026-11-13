@@ -10,6 +10,9 @@ beautifulsoup4>=4.12   # EPUB / HTML parsing
 lxml>=5.0              # faster HTML parser (EbookLib needs it anyway)
 python-docx>=1.1       # DOCX import + export
 
+# Convert to Word (tab 1): PDF pages rebuilt in Word with their layout and images
+pdf2docx>=0.5.8
+
 # Export
 reportlab>=4.0         # PDF export
 

@@ -1,8 +1,15 @@
 """
 ui.py - CustomTkinter desktop interface for Memory Palace.
 
-Views (switched from the sidebar):
-* Read    - the main screen: books by chapter and header; text shown in full or
+Three tabs along the top:
+1. Convert to Word (``ConvertTab``) - originals become editable Word copies
+   (``converter.py``) in the "Word copies" folder.
+2. Add edited files (``AddTab``) - the edited Word copies are imported as
+   books of cards; a newer version can replace the earlier import.
+3. Memory Palace - the sidebar and the views below, opening on Review.
+
+Views on the Memory Palace tab (switched from the sidebar):
+* Read    - books by chapter and header; text shown in full or
             one sentence per line with a ✕ to delete it.
 * Review  - one card at a time, swipe or buttons: right = I know,
             left = I don't know, down = delete. Arrow keys work too; Ctrl+Z undoes.
@@ -33,7 +40,7 @@ import threading
 import traceback
 import tkinter as tk
 from collections import deque
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
@@ -45,6 +52,7 @@ try:
 except ImportError:  # images are shown as placeholders without Pillow
     Image = ImageOps = None
 
+from converter import CONVERTIBLE_EXTENSIONS, WORD_EXTENSIONS, ConversionResult, convert_to_docx
 from db import MANUAL_FORMAT, KnowledgeBase
 from exporter import EXPORT_FORMATS, ExportError, ExportOptions, export
 from ocr import PHOTO_EXTENSIONS, OcrError, engine_name, extract_text, photo_for_card, unavailable_message
@@ -1110,6 +1118,7 @@ class App(ctk.CTk):
         self.minsize(1000, 640)
         self.ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
         self._importing = False
+        self._import_done: Callable[[dict], None] | None = None
         self.speaker = Speaker()
         self._speech_button: ctk.CTkButton | None = None
         self._speech_label = ""
@@ -1125,10 +1134,16 @@ class App(ctk.CTk):
         }
         apply_treeview_style(self)
 
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build_tab_bar()
+
+        # Tab 3: the palace itself (sidebar + views).
+        self.palace = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        self.palace.grid_columnconfigure(1, weight=1)
+        self.palace.grid_rowconfigure(0, weight=1)
         self._build_sidebar()
-        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        self.content = ctk.CTkFrame(self.palace, fg_color="transparent")
         self.content.grid(row=0, column=1, sticky="nsew", padx=12, pady=12)
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
@@ -1141,7 +1156,13 @@ class App(ctk.CTk):
             "export": ExportView(self.content, self),
         }
         self.current_view = ""
-        self.show_view("read")
+        self.tabs: dict[str, ctk.CTkFrame] = {
+            "convert": ConvertTab(self, self),
+            "add": AddTab(self, self),
+            "palace": self.palace,
+        }
+        self.current_tab = ""
+        self.show_tab("palace" if self.kb.list_documents() else "convert")
 
         for key, action in (("<Right>", "know"), ("<Left>", "unknown"), ("<Down>", "delete"),
                             ("<Delete>", "delete")):
@@ -1154,8 +1175,44 @@ class App(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- layout --------------------------------------------------------------
+    TAB_LABELS = {
+        "convert": "①  Convert to Word",
+        "add": "②  Add edited files",
+        "palace": "③  Memory Palace",
+    }
+
+    def _build_tab_bar(self):
+        band = ctk.CTkFrame(self, corner_radius=0, fg_color=("gray86", "gray14"))
+        band.grid(row=0, column=0, sticky="ew")
+        self._tab_keys = {label: key for key, label in self.TAB_LABELS.items()}
+        self.tab_bar = ctk.CTkSegmentedButton(
+            band, values=list(self.TAB_LABELS.values()), height=34, font=self.fonts["big"],
+            command=lambda label: self.show_tab(self._tab_keys[label]))
+        self.tab_bar.pack(side="left", padx=12, pady=8)
+        self.band_status = ctk.CTkLabel(band, text="", text_color=MUTED, font=self.fonts["small"], anchor="e")
+        self.band_status.pack(side="right", padx=16)
+
+    def show_tab(self, key: str, view: str | None = None):
+        """Switch the top tab. ``view`` picks the palace screen (Review by default)."""
+        if key != self.current_tab:
+            self.stop_speech()
+            if self.current_tab:
+                self.tabs[self.current_tab].grid_remove()
+            self.current_tab = key
+            self.tabs[key].grid(row=1, column=0, sticky="nsew")
+        self.tab_bar.set(self.TAB_LABELS[key])
+        if key == "palace":
+            self.show_view(view or self.current_view or "review")
+        else:
+            self.tabs[key].on_show()
+
+    def word_folder(self) -> Path:
+        """Where Word copies are written (and looked for on the second tab)."""
+        saved = self.kb.get_setting("word_folder")
+        return Path(saved) if saved else self.kb.data_dir.parent / "Word copies"
+
     def _build_sidebar(self):
-        bar = ctk.CTkFrame(self, width=210, corner_radius=0)
+        bar = ctk.CTkFrame(self.palace, width=210, corner_radius=0)
         bar.grid(row=0, column=0, sticky="nsw")
         bar.grid_rowconfigure(10, weight=1)
         ctk.CTkLabel(bar, text="🏛  Memory Palace", font=ctk.CTkFont(FONT_FAMILY, 18, "bold")).grid(
@@ -1193,6 +1250,9 @@ class App(ctk.CTk):
         apply_treeview_style(self)
 
     def show_view(self, name: str):
+        if getattr(self, "tabs", None) and self.current_tab != "palace":
+            self.show_tab("palace", name)  # comes back here with the palace tab showing
+            return
         if name != self.current_view:
             self.stop_speech()
         if self.current_view:
@@ -1214,13 +1274,18 @@ class App(ctk.CTk):
 
     def set_status(self, text: str):
         self.status_label.configure(text=text)
+        self.band_status.configure(text=text)
 
     def notify_data_changed(self, source: str | None = None):
         """Mark every view stale. The visible one (unless it caused the change) refreshes now."""
-        for name, view in self.views.items():
+        for view in self.views.values():
             view.dirty = True
-        if self.current_view and self.current_view != source:
-            self.views[self.current_view].on_show()
+        self.tabs["add"].dirty = True
+        if self.current_tab == "palace":
+            if self.current_view and self.current_view != source:
+                self.views[self.current_view].on_show()
+        elif self.current_tab == "add":
+            self.tabs["add"].on_show()
         self.update_stats()
 
     # -- threading ---------------------------------------------------------
@@ -1267,6 +1332,8 @@ class App(ctk.CTk):
         return False
 
     def _review_key(self, action: str):
+        if self.current_tab != "palace":
+            return
         if self.current_view == "read" and action == "undo" and not self._typing():
             self.views["read"].undo()  # type: ignore[attr-defined]
             return
@@ -1283,7 +1350,9 @@ class App(ctk.CTk):
             review.answer(action)
 
     # -- import --------------------------------------------------------------
-    def import_documents(self, paths: list[str] | None = None):
+    def import_documents(self, paths: list[str] | None = None,
+                         on_done: Callable[[dict], None] | None = None) -> None:
+        """Import files as books of cards. ``on_done`` gets the report afterwards."""
         if self._importing:
             messagebox.showinfo(APP_NAME, "An import is already running.")
             return
@@ -1297,7 +1366,8 @@ class App(ctk.CTk):
         if not files:
             return
         self._importing = True
-        self._import_report = {"ok": [], "failed": [], "warnings": []}
+        self._import_report = {"ok": [], "failed": [], "warnings": [], "kept": 0}
+        self._import_done = on_done
         self._import_step(files, 0)
 
     def _import_step(self, files: list[Path], idx: int):
@@ -1326,17 +1396,41 @@ class App(ctk.CTk):
                 report["failed"].append((path.name, "skipped (duplicate)"))
                 self._import_step(files, idx + 1)
                 return
+            replace: list[dict] = []
+            earlier = [d for d in self.kb.find_documents_by_path(path) if d["file_hash"] != file_hash]
+            if earlier and not existing:
+                names = ", ".join(f"“{d['title']}”" for d in earlier)
+                choice = messagebox.askyesnocancel(
+                    "Earlier version in the palace",
+                    f"An earlier version of “{path.name}” is already in the palace as {names}.\n\n"
+                    "Yes: replace it. Cards whose text is unchanged keep their review progress; "
+                    "the rest of the old cards are removed.\n"
+                    "No: keep both.\n"
+                    "Cancel: don't add this file.",
+                )
+                if choice is None:
+                    report["failed"].append((path.name, "skipped"))
+                    self._import_step(files, idx + 1)
+                    return
+                if choice:
+                    replace = earlier
             media_abs, media_rel = self.kb.new_media_dir()
             self.set_status(f"Parsing {label}…")
 
             def parsed_ok(parsed):
                 try:
-                    _, auto = self.kb.add_document(parsed, str(path), file_hash, media_rel)
+                    doc_id, auto = self.kb.add_document(parsed, str(path), file_hash, media_rel)
                 except Exception as exc:  # noqa: BLE001
                     shutil.rmtree(media_abs, ignore_errors=True)
                     failed(exc, "")
                     return
-                report["ok"].append((parsed.title, len(parsed.sections), auto))
+                title = parsed.title
+                for old in replace:
+                    report["kept"] += self.kb.replace_document(old["id"], doc_id)
+                    title = old["title"]
+                if replace:
+                    title += " (replaced the earlier version)"
+                report["ok"].append((title, len(parsed.sections), auto))
                 report["warnings"] += [f"{path.name}: {w}" for w in parsed.warnings]
                 self._import_step(files, idx + 1)
 
@@ -1357,6 +1451,8 @@ class App(ctk.CTk):
             for title, n, auto in r["ok"]:
                 extra = f", {auto} auto-tags" if auto else ""
                 lines.append(f"  ✓ {title}: {n} sections{extra}")
+            if r["kept"]:
+                lines.append(f"  {r['kept']} unchanged cards kept their review progress.")
         if r["failed"]:
             lines.append("\nNot imported:")
             lines += [f"  ✗ {name}: {msg}" for name, msg in r["failed"]]
@@ -1368,6 +1464,9 @@ class App(ctk.CTk):
         self.set_status(f"Import finished: {len(r['ok'])} ok, {len(r['failed'])} failed.")
         self.notify_data_changed()
         (messagebox.showwarning if r["failed"] else messagebox.showinfo)("Import", "\n".join(lines))
+        done, self._import_done = self._import_done, None
+        if done:
+            done(r)
 
     # -- shared tag flow -----------------------------------------------------
     def prompt_add_tag(self, section_id: int | None = None, document_id: int | None = None) -> bool:
@@ -1500,6 +1599,363 @@ class App(ctk.CTk):
         self.speaker.stop()
         self.kb.close()
         self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Tabs 1 and 2: convert originals to Word, then add the edited Word files
+# ---------------------------------------------------------------------------
+def human_size(n: float) -> str:
+    if n < 1024:
+        return f"{n:.0f} bytes"
+    for unit in ("KB", "MB", "GB"):
+        n /= 1024
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}"
+    return ""
+
+
+def word_files(folder: Path) -> list[Path]:
+    """The .docx files in ``folder``, newest first (Word's "~$" lock files skipped)."""
+    try:
+        files = [p for p in folder.iterdir()
+                 if p.is_file() and p.suffix.lower() in WORD_EXTENSIONS and not p.name.startswith("~$")]
+    except OSError:
+        return []
+
+    def mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+    return sorted(files, key=mtime, reverse=True)
+
+
+class FolderTab(ctk.CTkFrame):
+    """Shared layout of the first two tabs: title, explanation, toolbar, the
+    Word copies folder, a list of its files and a footer."""
+
+    def __init__(self, master, app: App, title: str, intro: str, columns: dict[str, tuple[str, int]]):
+        super().__init__(master, fg_color="transparent", corner_radius=0)
+        self.app, self.kb = app, app.kb
+        self.dirty = True
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=24, pady=(18, 6))
+        ctk.CTkLabel(head, text=title, font=app.fonts["title"], anchor="w").pack(anchor="w")
+        ctk.CTkLabel(head, text=intro, justify="left", anchor="w", wraplength=920, text_color=MUTED,
+                     font=app.fonts["body"]).pack(anchor="w", pady=(4, 0))
+
+        self.toolbar = ctk.CTkFrame(self, fg_color="transparent")
+        self.toolbar.grid(row=1, column=0, sticky="ew", padx=24, pady=(8, 4))
+
+        folder_bar = ctk.CTkFrame(self, fg_color="transparent")
+        folder_bar.grid(row=2, column=0, sticky="ew", padx=24, pady=(4, 4))
+        self.folder_label = ctk.CTkLabel(folder_bar, text="", anchor="w", text_color=MUTED,
+                                         font=app.fonts["small"])
+        self.folder_label.pack(side="left")
+        ctk.CTkButton(folder_bar, text="Change folder…", width=120, height=26, fg_color="gray50",
+                      hover_color="gray40", command=self._change_folder).pack(side="right")
+        ctk.CTkButton(folder_bar, text="📂  Open folder", width=120, height=26, fg_color="gray50",
+                      hover_color="gray40", command=self._open_folder).pack(side="right", padx=6)
+
+        frame, self.tree = make_tree(self, columns, "Word file", tree_width=460)
+        self.tree.configure(selectmode="extended")
+        frame.grid(row=3, column=0, sticky="nsew", padx=24, pady=4)
+        self.tree.bind("<Double-1>", lambda e: self._open_selected())
+        self.tree.bind("<Return>", lambda e: self._open_selected())
+        self.empty_label = ctk.CTkLabel(frame, text="", text_color=MUTED, font=app.fonts["body"])
+        self._paths: dict[str, Path] = {}
+
+        self.footer = ctk.CTkFrame(self, fg_color="transparent")
+        self.footer.grid(row=4, column=0, sticky="ew", padx=24, pady=(6, 18))
+
+    # -- folder --------------------------------------------------------------
+    def folder(self) -> Path:
+        return self.app.word_folder()
+
+    def _open_folder(self):
+        folder = self.folder()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"Cannot create {folder}:\n{exc}")
+            return
+        open_with_system(folder)
+
+    def _change_folder(self):
+        chosen = filedialog.askdirectory(title="Folder for the Word copies", initialdir=str(self.folder()),
+                                         mustexist=False)
+        if not chosen:
+            return
+        self.kb.set_setting("word_folder", str(Path(chosen)))
+        for tab in ("convert", "add"):
+            self.app.tabs[tab].dirty = True
+        self.refresh()
+
+    # -- list ----------------------------------------------------------------
+    def on_show(self):
+        if self.dirty:
+            self.refresh()
+
+    def refresh(self):
+        self.dirty = False
+        folder = self.folder()
+        self.folder_label.configure(text=f"Word copies folder:  {folder}")
+        selected = set(self.selected_paths())
+        self.tree.delete(*self.tree.get_children())
+        self._paths.clear()
+        files = word_files(folder)
+        for path in files:
+            iid = self.tree.insert("", "end", text=path.name, values=self.row_values(path))
+            self._paths[iid] = path
+        self.select_paths(selected)
+        if files:
+            self.empty_label.place_forget()
+        else:
+            self.empty_label.configure(text=self.empty_text())
+            self.empty_label.place(relx=0.5, rely=0.5, anchor="center")
+
+    def select_paths(self, paths: set[Path]):
+        keep = [iid for iid, p in self._paths.items() if p in paths]
+        if keep:
+            self.tree.selection_set(keep)
+            self.tree.see(keep[0])
+
+    def selected_paths(self) -> list[Path]:
+        return [self._paths[i] for i in self.tree.selection() if i in self._paths]
+
+    def _open_selected(self):
+        paths = self.selected_paths()
+        if not paths:
+            messagebox.showinfo(APP_NAME, "Select a Word file in the list first.")
+            return
+        for path in paths[:5]:
+            open_with_system(path)
+
+    @staticmethod
+    def modified(path: Path) -> str:
+        try:
+            stamp = datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            return ""
+        return stamp.strftime("%d %b %Y  %H:%M")
+
+    def row_values(self, path: Path) -> tuple:
+        raise NotImplementedError
+
+    def empty_text(self) -> str:
+        return "No Word files here yet."
+
+
+class ConvertTab(FolderTab):
+    """Tab 1: make an editable Word copy of each original document."""
+
+    def __init__(self, master, app: App):
+        super().__init__(
+            master, app, "①  Convert your documents to Word",
+            "Choose PDFs, EPUBs, Word, text or Markdown files. Each one is copied into Word, keeping the text, "
+            "formatting and images as close to the original as possible. Open the copy in Word, cut it "
+            "down to what you want to remember and save it, then add it to the palace on the next tab.",
+            {"modified": ("Modified", 170), "size": ("Size", 100)},
+        )
+        self._busy = False
+        self.choose_btn = ctk.CTkButton(self.toolbar, text="＋  Choose files to convert…", height=40,
+                                        font=app.fonts["big"], command=self.choose)
+        self.choose_btn.pack(side="left")
+        self.progress = ctk.CTkProgressBar(self.toolbar, mode="indeterminate", width=220)
+        self.progress_label = ctk.CTkLabel(self.toolbar, text="", text_color=MUTED, font=app.fonts["small"])
+
+        ctk.CTkButton(self.footer, text="Open in Word", width=140, command=self._open_selected).pack(side="left")
+        ctk.CTkButton(self.footer, text="Next:  ② Add edited files  →", width=220, fg_color=GREEN,
+                      hover_color="#25804a", command=lambda: app.show_tab("add")).pack(side="right")
+
+    def row_values(self, path: Path) -> tuple:
+        try:
+            size = human_size(path.stat().st_size)
+        except OSError:
+            size = ""
+        return self.modified(path), size
+
+    def empty_text(self) -> str:
+        return "Nothing converted yet. Choose files to convert to get started."
+
+    def choose(self):
+        patterns = " ".join(f"*{e}" for e in CONVERTIBLE_EXTENSIONS)
+        paths = filedialog.askopenfilenames(
+            title="Choose documents to convert to Word",
+            filetypes=[("Documents", patterns), ("All files", "*.*")],
+        )
+        if paths:
+            self.convert([Path(p) for p in paths])
+
+    def _set_busy(self, busy: bool, text: str = ""):
+        self._busy = busy
+        self.choose_btn.configure(state="disabled" if busy else "normal")
+        self.progress_label.configure(text=text)
+        if busy and not self.progress.winfo_ismapped():
+            self.progress.pack(side="left", padx=(16, 8))
+            self.progress_label.pack(side="left")
+            self.progress.start()
+        elif not busy:
+            self.progress.stop()
+            self.progress.pack_forget()
+            self.progress_label.pack_forget()
+
+    def convert(self, files: list[Path]):
+        if self._busy:
+            messagebox.showinfo(APP_NAME, "A conversion is already running.")
+            return
+        folder = self.folder()
+        report: dict[str, list] = {"ok": [], "failed": []}
+
+        def step(i: int):
+            if i >= len(files):
+                finished()
+                return
+            src = files[i]
+            text = f"Converting ({i + 1}/{len(files)}) {src.name}…"
+            if src.suffix.lower() == ".pdf":
+                text += "  Long PDFs can take a few minutes."
+            self._set_busy(True, text)
+            self.app.set_status(f"Converting {src.name}…")
+
+            def ok(result: ConversionResult):
+                report["ok"].append(result)
+                step(i + 1)
+
+            def failed(exc: BaseException, tb: str):
+                if isinstance(exc, (ParseError, OSError)):
+                    msg = str(exc)
+                else:
+                    traceback.print_exception(exc)
+                    msg = f"{type(exc).__name__}: {exc}"
+                report["failed"].append((src.name, msg))
+                step(i + 1)
+
+            self.app.run_background(lambda: convert_to_docx(src, folder), ok, failed)
+
+        def finished():
+            self._set_busy(False)
+            self.app.tabs["add"].dirty = True
+            self.refresh()
+            ok, bad = report["ok"], report["failed"]
+            self.select_paths({r.output for r in ok})
+            self.app.set_status(f"Converted {len(ok)} file(s)" + (f", {len(bad)} failed." if bad else "."))
+            lines = []
+            if ok:
+                lines.append(f"Saved in {folder}:")
+                for r in ok:
+                    lines.append(f"  ✓ {r.output.name}  ({r.method})")
+                    lines += [f"      • {w}" for w in r.warnings[:3]]
+            if bad:
+                lines.append("\nNot converted:")
+                lines += [f"  ✗ {name}: {msg}" for name, msg in bad]
+            if len(ok) == 1:
+                lines.append("\nOpen it in Word now?")
+                if messagebox.askyesno("Convert to Word", "\n".join(lines)):
+                    open_with_system(ok[0].output)
+            else:
+                (messagebox.showwarning if bad else messagebox.showinfo)("Convert to Word", "\n".join(lines))
+
+        step(0)
+
+
+class AddTab(FolderTab):
+    """Tab 2: add edited Word files to the palace as books of cards."""
+
+    STATUS_IN = "✓  In the palace"
+    STATUS_EDITED = "✎  Edited since it was added"
+    STATUS_NEW = "Not added yet"
+
+    def __init__(self, master, app: App):
+        super().__init__(
+            master, app, "②  Add your edited files to the palace",
+            "When you have cut a Word copy down in Word, save it and add it here. Each file becomes a book "
+            "of cards for spaced repetition on the Memory Palace tab. Adding a newer version of a file "
+            "that is already in the palace can replace the old cards; unchanged cards keep their progress.",
+            {"status": ("Status", 230), "modified": ("Modified", 170)},
+        )
+        self._hashes: dict[tuple[str, float, int], str] = {}
+        self._in_hashes: set[str] = set()
+        self._in_paths: set[str] = set()
+        ctk.CTkButton(self.toolbar, text="＋  Add selected to the palace", height=40, font=app.fonts["big"],
+                      fg_color=GREEN, hover_color="#25804a", command=self.add_selected).pack(side="left")
+        ctk.CTkButton(self.toolbar, text="Add other files…", height=40,
+                      command=self.add_other).pack(side="left", padx=10)
+        ctk.CTkButton(self.toolbar, text="↻  Refresh", width=100, height=40, fg_color="gray50",
+                      hover_color="gray40", command=self.refresh).pack(side="right")
+
+        ctk.CTkButton(self.footer, text="Open in Word", width=140, command=self._open_selected).pack(side="left")
+        ctk.CTkLabel(self.footer, text="Tip: save your changes in Word before adding a file.",
+                     text_color=MUTED, font=app.fonts["small"]).pack(side="left", padx=12)
+        ctk.CTkButton(self.footer, text="Go to  ③ Memory Palace  →", width=220,
+                      command=lambda: app.show_tab("palace", "review")).pack(side="right")
+
+    def empty_text(self) -> str:
+        return "No Word files yet. Convert documents on the first tab, or use “Add other files…”."
+
+    def _hash(self, path: Path) -> str | None:
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        key = (str(path), st.st_mtime, st.st_size)
+        if key not in self._hashes:
+            try:
+                self._hashes[key] = file_sha256(path)
+            except OSError:
+                return None
+        return self._hashes[key]
+
+    def refresh(self):
+        docs = self.kb.list_documents()
+        self._in_hashes = {d["file_hash"] for d in docs if d.get("file_hash")}
+        self._in_paths = {KnowledgeBase._path_key(d["file_path"]) for d in docs if d.get("file_path")}
+        super().refresh()
+
+    def row_values(self, path: Path) -> tuple:
+        if self._hash(path) in self._in_hashes:
+            status = self.STATUS_IN
+        elif KnowledgeBase._path_key(path) in self._in_paths:
+            status = self.STATUS_EDITED
+        else:
+            status = self.STATUS_NEW
+        return status, self.modified(path)
+
+    def add_selected(self):
+        paths = self.selected_paths()
+        if not paths:
+            paths = [p for iid, p in self._paths.items() if self.tree.set(iid, "status") != self.STATUS_IN]
+            if not paths:
+                messagebox.showinfo(APP_NAME, "Select the Word files to add in the list "
+                                              "(Ctrl+click or Shift+click to select several).")
+                return
+            names = "\n".join(f"  • {p.name}" for p in paths[:12])
+            more = f"\n  … and {len(paths) - 12} more" if len(paths) > 12 else ""
+            if not messagebox.askyesno(APP_NAME, "Nothing is selected. Add every file that isn't in the "
+                                                 f"palace yet?\n\n{names}{more}"):
+                return
+        self._add(paths)
+
+    def add_other(self):
+        patterns = " ".join(f"*{e}" for e in SUPPORTED_EXTENSIONS)
+        paths = filedialog.askopenfilenames(
+            title="Add files to the palace", initialdir=str(self.folder()),
+            filetypes=[("Word files", "*.docx"), ("All supported documents", patterns), ("All files", "*.*")],
+        )
+        if paths:
+            self._add([Path(p) for p in paths])
+
+    def _add(self, paths: list[Path]):
+        def done(report: dict):
+            self.dirty = True
+            if report["ok"]:
+                self.app.show_tab("palace", "review")
+            else:
+                self.refresh()
+        self.app.import_documents([str(p) for p in paths], on_done=done)
 
 
 # ---------------------------------------------------------------------------

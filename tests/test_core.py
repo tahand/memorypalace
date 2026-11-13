@@ -453,3 +453,161 @@ def test_lines_split_and_remove():
     assert remove_line("Only one.", 0) == ""
     assert heading_path("Ch 2 › Cells (part 3)", "Book") == ("Ch 2", "Cells")
     assert heading_path(None, "Book") == ("Book",)
+
+
+# -- convert to Word -------------------------------------------------------
+def _word_text(path: Path) -> str:
+    import docx
+    d = docx.Document(str(path))
+    parts = [p.text for p in d.paragraphs]
+    for t in d.tables:
+        parts += [c.text for row in t.rows for c in row.cells]
+    return "\n".join(parts)
+
+
+def test_convert_epub_keeps_formatting_and_images(tmp_path):
+    import docx
+    import converter
+    from ebooklib import epub
+    book = epub.EpubBook()
+    book.set_identifier("id1")
+    book.set_title("Epub Title")
+    book.add_author("An Author")
+    book.add_item(epub.EpubItem(uid="img1", file_name="images/pic.png", media_type="image/png",
+                                content=png_bytes()))
+    c1 = epub.EpubHtml(title="One", file_name="text/ch1.xhtml")
+    c1.content = (
+        "<html><body><h1>Chapter 1</h1><p>Hello <em>world</em> of <b>cells</b>.</p>"
+        "<p><img src='../images/pic.png'/></p><ul><li>item one</li><li>item two</li></ul>"
+        "<table><tr><th>key</th><td>value</td></tr></table></body></html>"
+    )
+    c2 = epub.EpubHtml(title="Two", file_name="text/ch2.xhtml")
+    c2.content = "<html><body><h1>Chapter 2</h1><blockquote>A quote.</blockquote></body></html>"
+    for c in (c1, c2):
+        book.add_item(c)
+    book.spine = ["nav", c1, c2]
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    src = tmp_path / "b.epub"
+    epub.write_epub(str(src), book)
+
+    result = converter.convert_to_docx(src, tmp_path / "out")
+    assert result.output == tmp_path / "out" / "b.docx"
+    d = docx.Document(str(result.output))
+    assert d.core_properties.title == "Epub Title" and d.core_properties.author == "An Author"
+    styles = {p.text: p.style.name for p in d.paragraphs if p.text}
+    assert styles["Chapter 1"] == "Heading 1" and styles["Chapter 2"] == "Heading 1"
+    assert styles["item one"] == "List Bullet" and styles["A quote."] == "Quote"
+    hello = next(p for p in d.paragraphs if p.text.startswith("Hello"))
+    assert hello.text == "Hello world of cells."
+    assert any(r.italic for r in hello.runs if r.text == "world")
+    assert any(r.bold for r in hello.runs if r.text == "cells")
+    assert len(d.inline_shapes) == 1
+    assert d.tables[0].cell(0, 0).text == "key" and d.tables[0].cell(0, 1).text == "value"
+
+    # The Word copy imports with the same chapters.
+    again = converter.convert_to_docx(src, tmp_path / "out")
+    assert again.output.name == "b (2).docx"
+    parsed = mp_parser.parse_file(result.output, tmp_path / "media", "media")
+    assert [s.heading for s in parsed.sections] == ["Chapter 1", "Chapter 2"]
+    assert len(parsed.sections[0].image_paths) == 1
+
+
+def test_convert_text_markdown_and_docx(tmp_path):
+    import converter
+    txt = tmp_path / "notes.txt"
+    txt.write_text("CHAPTER ONE\n\nSome notes\nwrapped here.\n\nMore notes.\n", encoding="utf-8")
+    out = converter.convert_to_docx(txt, tmp_path / "w").output
+    assert "Some notes wrapped here." in _word_text(out)
+
+    (tmp_path / "p.png").write_bytes(png_bytes())
+    md = tmp_path / "m.md"
+    md.write_text("# Title\n\nText ![x](p.png)\n", encoding="utf-8")
+    import docx
+    d = docx.Document(str(converter.convert_to_docx(md, tmp_path / "w").output))
+    assert d.paragraphs[0].style.name == "Heading 1" and len(d.inline_shapes) == 1
+
+    original = tmp_path / "orig.docx"
+    docx.Document().save(original)
+    copied = converter.convert_to_docx(original, tmp_path / "w").output
+    assert copied.read_bytes() == original.read_bytes() and copied != original
+
+    with pytest.raises(mp_parser.ParseError):
+        converter.convert_to_docx(tmp_path / "missing.pdf", tmp_path / "w")
+    (tmp_path / "empty.txt").write_text("", encoding="utf-8")
+    with pytest.raises(mp_parser.ParseError):
+        converter.convert_to_docx(tmp_path / "empty.txt", tmp_path / "w")
+    assert sorted(p.name for p in (tmp_path / "w").iterdir()) == ["m.docx", "notes.docx", "orig.docx"]
+
+
+def test_mark_headings_from_fonts_and_toc(tmp_path):
+    import docx
+    from docx.shared import Pt
+    import converter
+
+    def build() -> Path:
+        d = docx.Document()
+        for text, size, bold in [("Big Title", 24, False), ("Contents\t1", 11, True),
+                                 ("Body text that runs on for a while.", 11, False),
+                                 ("Bold Section", 11, True), ("More body text, quite ordinary.", 11, False),
+                                 ("Ends with a full stop.", 11, True)]:
+            run = d.add_paragraph().add_run(text)
+            run.font.size, run.bold = Pt(size), bold
+        path = tmp_path / "h.docx"
+        d.save(path)
+        return path
+
+    def levels(path: Path) -> dict[str, str]:
+        out = {}
+        for p in docx.Document(str(path)).paragraphs:
+            v = p._p.xpath("./w:pPr/w:outlineLvl/@w:val")
+            if v:
+                out[p.text] = v[0]
+        return out
+
+    path = build()
+    assert converter.mark_headings(path) == 2
+    assert levels(path) == {"Big Title": "0", "Bold Section": "1"}
+    parsed = mp_parser.parse_file(path, tmp_path / "media", "media")
+    assert "Bold Section" in [s.heading.split(" › ")[-1] for s in parsed.sections]
+
+    path = build()  # bookmarks win over guessing
+    assert converter.mark_headings(path, [(1, "Bold Section")]) == 1
+    assert levels(path) == {"Bold Section": "0"}
+
+
+def test_convert_pdf(tmp_path):
+    pytest.importorskip("pdf2docx")
+    import converter
+    (tmp_path / "i.png").write_bytes(png_bytes())
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf(pdf, tmp_path / "i.png", with_toc=True)
+    result = converter.convert_to_docx(pdf, tmp_path / "w")
+    text = _word_text(result.output)
+    assert "Introduction" in text and "We measured things carefully." in text
+    parsed = mp_parser.parse_file(result.output, tmp_path / "media", "media")
+    headings = [s.heading for s in parsed.sections]
+    assert "Introduction" in headings and "Methods" in headings
+    assert parsed.title == "PDF Title"
+    assert any(s.image_paths for s in parsed.sections)
+
+
+def test_replace_document_keeps_progress_of_unchanged_cards(kb, tmp_path):
+    src = tmp_path / "book.md"
+    src.write_text("# One\n\nKeep me.\n\n# Two\n\nCut me.\n", encoding="utf-8")
+    old_id, _ = parse_into(kb, src)
+    kb.update_document(old_id, title="Renamed")
+    keep, cut = kb.get_sections(old_id)
+    kb.record_answer(keep["id"], known=True)
+    kb.add_tag_to_section(keep["id"], "important")
+    assert [d["id"] for d in kb.find_documents_by_path(tmp_path / "." / "book.md")] == [old_id]
+
+    src.write_text("# One\n\nKeep me.\n\n# Three\n\nNew text.\n", encoding="utf-8")
+    new_id, _ = parse_into(kb, src)
+    assert kb.replace_document(old_id, new_id) == 1
+    assert kb.get_document(old_id) is None
+    assert kb.get_document(new_id)["title"] == "Renamed"
+    first, second = kb.get_sections(new_id)
+    assert kb.get_review(first["id"])["repetitions"] == 1
+    assert kb.section_tags(first["id"]) == ["important"]
+    assert kb.get_review(second["id"])["repetitions"] == 0
